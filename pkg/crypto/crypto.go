@@ -43,7 +43,7 @@ func HybridEncrypt(rnd io.Reader, pubKey *rsa.PublicKey, plaintext, label []byte
 	}
 
 	// Encrypt symmetric key
-	rsaCiphertext, err := rsa.EncryptOAEP(sha256.New(), rnd, pubKey, sessionKey, label)
+	rsaCiphertext, err := rsa.EncryptOAEP(sha256.New(), rnd, pubKey, sessionKey, nil)
 	if err != nil {
 		return nil, err
 	}
