@@ -1,11 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	goflag "flag"
 	"fmt"
 	"io"
@@ -23,9 +18,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
-
-	cloudkms "cloud.google.com/go/kms/apiv1"
-	kmspb "google.golang.org/genproto/googleapis/cloud/kms/v1"
 
 	ssv1alpha1 "github.com/bitnami-labs/sealed-secrets/pkg/apis/sealed-secrets/v1alpha1"
 
@@ -66,25 +58,6 @@ func init() {
 	flag.CommandLine.AddGoFlagSet(goflag.CommandLine)
 }
 
-func parseKey(r io.Reader) (*rsa.PublicKey, error) {
-	data, err := ioutil.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-
-	block, _ := pem.Decode([]byte(data))
-	abstractKey, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse public key: %+v", err)
-	}
-	rsaKey, ok := abstractKey.(*rsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("key is not RSA")
-	}
-
-	return rsaKey, nil
-}
-
 func readSecret(codec runtime.Decoder, r io.Reader) (*v1.Secret, error) {
 	data, err := ioutil.ReadAll(r)
 	if err != nil {
@@ -114,38 +87,7 @@ func prettyEncoder(codecs runtimeserializer.CodecFactory, mediaType string, gv r
 	return enc, nil
 }
 
-func openCertFile(certFile string) (io.ReadCloser, error) {
-	f, err := os.Open(certFile)
-	if err != nil {
-		return nil, fmt.Errorf("Error reading %s: %v", certFile, err)
-	}
-	return f, nil
-}
-
-func openCert() (io.ReadCloser, error) {
-	if *certFile != "" {
-		return openCertFile(*certFile)
-	}
-
-	if *kmsKeyName == "" {
-		return nil, fmt.Errorf("kms-key should be in format 'projects/<project-name>/locations/<location>/keyRings/<keyring-name>/cryptoKeys/<key-name>'")
-	}
-
-	ctx := context.Background()
-	client, err := cloudkms.NewKeyManagementClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Retrieve the public key from KMS.
-	response, err := client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{Name: *kmsKeyName})
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch public key: %+v", err)
-	}
-	return ioutil.NopCloser(bytes.NewReader([]byte(response.Pem))), nil
-}
-
-func seal(in io.Reader, out io.Writer, codecs runtimeserializer.CodecFactory, pubKey *rsa.PublicKey) error {
+func seal(in io.Reader, out io.Writer, codecs runtimeserializer.CodecFactory, keyName string) error {
 	secret, err := readSecret(codecs.UniversalDecoder(), in)
 	if err != nil {
 		return err
@@ -181,7 +123,7 @@ func seal(in io.Reader, out io.Writer, codecs runtimeserializer.CodecFactory, pu
 	secret.SetDeletionTimestamp(nil)
 	secret.DeletionGracePeriodSeconds = nil
 
-	ssecret, err := ssv1alpha1.NewSealedSecret(codecs, pubKey, secret)
+	ssecret, err := ssv1alpha1.NewSealedSecret(codecs, keyName, secret)
 	if err != nil {
 		return err
 	}
@@ -263,25 +205,7 @@ func main() {
 		return
 	}
 
-	f, err := openCert()
-	if err != nil {
-		panic(err.Error())
-	}
-	defer f.Close()
-
-	if *dumpCert {
-		if _, err := io.Copy(os.Stdout, f); err != nil {
-			panic(err.Error())
-		}
-		return
-	}
-
-	pubKey, err := parseKey(f)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	if err := seal(os.Stdin, os.Stdout, scheme.Codecs, pubKey); err != nil {
+	if err := seal(os.Stdin, os.Stdout, scheme.Codecs, *kmsKeyName); err != nil {
 		panic(err.Error())
 	}
 }

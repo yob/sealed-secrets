@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rsa"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -25,7 +23,7 @@ var ErrTooShort = errors.New("SealedSecret data is too short")
 // HybridEncrypt performs a regular AES-GCM + RSA-OAEP encryption.
 // The output bytestring is:
 //   RSA ciphertext length || RSA ciphertext || AES ciphertext
-func HybridEncrypt(rnd io.Reader, pubKey *rsa.PublicKey, plaintext, label []byte) ([]byte, error) {
+func HybridEncrypt(rnd io.Reader, keyName string, plaintext, label []byte) ([]byte, error) {
 	// Generate a random symmetric key
 	sessionKey := make([]byte, sessionKeyBytes)
 	if _, err := io.ReadFull(rnd, sessionKey); err != nil {
@@ -43,7 +41,7 @@ func HybridEncrypt(rnd io.Reader, pubKey *rsa.PublicKey, plaintext, label []byte
 	}
 
 	// Encrypt symmetric key
-	rsaCiphertext, err := rsa.EncryptOAEP(sha256.New(), rnd, pubKey, sessionKey, label)
+	rsaCiphertext, err := kmsSymmetricEncrypt(keyName, sessionKey, label)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +74,7 @@ func HybridDecrypt(rnd io.Reader, keyName string, ciphertext, label []byte) ([]b
 	rsaCiphertext := ciphertext[2 : rsaLen+2]
 	aesCiphertext := ciphertext[rsaLen+2:]
 
-	sessionKey, err := kmsAsyncDecrypt(keyName, rsaCiphertext)
+	sessionKey, err := kmsSymmetricDecrypt(keyName, rsaCiphertext, label)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +100,7 @@ func HybridDecrypt(rnd io.Reader, keyName string, ciphertext, label []byte) ([]b
 	return plaintext, nil
 }
 
-func kmsAsyncDecrypt(keyName string, ciphertext []byte) ([]byte, error) {
+func kmsSymmetricEncrypt(keyName string, plaintext []byte, label []byte) ([]byte, error) {
 	ctx := context.Background()
 	client, err := cloudkms.NewKeyManagementClient(ctx)
 	if err != nil {
@@ -110,14 +108,39 @@ func kmsAsyncDecrypt(keyName string, ciphertext []byte) ([]byte, error) {
 	}
 
 	// Build the request.
-	req := &kmspb.AsymmetricDecryptRequest{
+	req := &kmspb.EncryptRequest{
+		Name:      keyName,
+		Plaintext: plaintext,
+		AdditionalAuthenticatedData: label,
+	}
+
+	// Call the API.
+	resp, err := client.Encrypt(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("encryption request failed: %+v", err)
+	}
+	return resp.Ciphertext, nil
+}
+
+func kmsSymmetricDecrypt(keyName string, ciphertext []byte, label []byte) ([]byte, error) {
+	ctx := context.Background()
+	client, err := cloudkms.NewKeyManagementClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build the request.
+	req := &kmspb.DecryptRequest{
 		Name:       keyName,
 		Ciphertext: ciphertext,
+		AdditionalAuthenticatedData: label,
 	}
+
 	// Call the API.
-	response, err := client.AsymmetricDecrypt(ctx, req)
+	resp, err := client.Decrypt(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("decryption request failed: %+v", err)
 	}
-	return response.Plaintext, nil
+
+	return resp.Plaintext, nil
 }
