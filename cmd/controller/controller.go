@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/rsa"
 	"fmt"
 	"log"
 	"time"
@@ -31,10 +30,10 @@ type Controller struct {
 	queue    workqueue.RateLimitingInterface
 	informer cache.SharedIndexInformer
 	sclient  v1.SecretsGetter
-	privKey  *rsa.PrivateKey
+	keyName  string
 }
 
-func unseal(sclient v1.SecretsGetter, codecs runtimeserializer.CodecFactory, key *rsa.PrivateKey, ssecret *ssv1alpha1.SealedSecret) error {
+func unseal(sclient v1.SecretsGetter, codecs runtimeserializer.CodecFactory, keyName string, ssecret *ssv1alpha1.SealedSecret) error {
 	// Important: Be careful not to reveal the namespace/name of
 	// the *decrypted* Secret (or any other detail) in error/log
 	// messages.
@@ -42,7 +41,7 @@ func unseal(sclient v1.SecretsGetter, codecs runtimeserializer.CodecFactory, key
 	objName := fmt.Sprintf("%s/%s", ssecret.GetObjectMeta().GetNamespace(), ssecret.GetObjectMeta().GetName())
 	log.Printf("Updating %s", objName)
 
-	secret, err := ssecret.Unseal(codecs, key)
+	secret, err := ssecret.Unseal(codecs, keyName)
 	if err != nil {
 		// TODO: Add error event
 		return err
@@ -62,7 +61,7 @@ func unseal(sclient v1.SecretsGetter, codecs runtimeserializer.CodecFactory, key
 }
 
 // NewController returns the main sealed-secrets controller loop.
-func NewController(clientset kubernetes.Interface, ssinformer ssinformer.SharedInformerFactory, privKey *rsa.PrivateKey) *Controller {
+func NewController(clientset kubernetes.Interface, ssinformer ssinformer.SharedInformerFactory, keyName string) *Controller {
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
 	informer := ssinformer.Bitnami().V1alpha1().
@@ -94,7 +93,7 @@ func NewController(clientset kubernetes.Interface, ssinformer ssinformer.SharedI
 		informer: informer,
 		queue:    queue,
 		sclient:  clientset.Core(),
-		privKey:  privKey,
+		keyName:  keyName,
 	}
 }
 
@@ -185,7 +184,7 @@ func (c *Controller) unseal(key string) error {
 	ssecret := obj.(*ssv1alpha1.SealedSecret)
 	log.Printf("Updating %s", key)
 
-	secret, err := ssecret.Unseal(scheme.Codecs, c.privKey)
+	secret, err := ssecret.Unseal(scheme.Codecs, c.keyName)
 	if err != nil {
 		return err
 	}
@@ -248,7 +247,7 @@ func (c *Controller) AttemptUnseal(content []byte) (bool, error) {
 
 	switch s := object.(type) {
 	case *ssv1alpha1.SealedSecret:
-		if _, err := s.Unseal(scheme.Codecs, c.privKey); err != nil {
+		if _, err := s.Unseal(scheme.Codecs, c.keyName); err != nil {
 			return false, nil
 		}
 		return true, nil

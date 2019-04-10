@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rsa"
-	"errors"
 	goflag "flag"
 	"fmt"
 	"io"
@@ -20,7 +18,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/cert"
 
 	ssv1alpha1 "github.com/bitnami-labs/sealed-secrets/pkg/apis/sealed-secrets/v1alpha1"
 
@@ -35,6 +32,7 @@ var (
 	certFile       = flag.String("cert", "", "Certificate / public key to use for encryption. Overrides --controller-*")
 	controllerNs   = flag.String("controller-namespace", metav1.NamespaceSystem, "Namespace of sealed-secrets controller.")
 	controllerName = flag.String("controller-name", "sealed-secrets-controller", "Name of sealed-secrets controller.")
+	kmsKeyName     = flag.String("kms-key", "", "KMS key name to encrypt with")
 	outputFormat   = flag.String("format", "json", "Output format for sealed secret. Either json or yaml")
 	dumpCert       = flag.Bool("fetch-cert", false, "Write certificate to stdout.  Useful for later use with --cert")
 	printVersion   = flag.Bool("version", false, "Print version information and exit")
@@ -58,30 +56,6 @@ func init() {
 
 	// Standard goflags (glog in particular)
 	flag.CommandLine.AddGoFlagSet(goflag.CommandLine)
-}
-
-func parseKey(r io.Reader) (*rsa.PublicKey, error) {
-	data, err := ioutil.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-
-	certs, err := cert.ParseCertsPEM(data)
-	if err != nil {
-		return nil, err
-	}
-
-	// ParseCertsPem returns error if len(certs) == 0, but best to be sure...
-	if len(certs) == 0 {
-		return nil, errors.New("Failed to read any certificates")
-	}
-
-	cert, ok := certs[0].PublicKey.(*rsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("Expected RSA public key but found %v", certs[0].PublicKey)
-	}
-
-	return cert, nil
 }
 
 func readSecret(codec runtime.Decoder, r io.Reader) (*v1.Secret, error) {
@@ -113,43 +87,7 @@ func prettyEncoder(codecs runtimeserializer.CodecFactory, mediaType string, gv r
 	return enc, nil
 }
 
-func openCertFile(certFile string) (io.ReadCloser, error) {
-	f, err := os.Open(certFile)
-	if err != nil {
-		return nil, fmt.Errorf("Error reading %s: %v", certFile, err)
-	}
-	return f, nil
-}
-
-func openCertHTTP(c corev1.CoreV1Interface, namespace, name string) (io.ReadCloser, error) {
-	f, err := c.
-		Services(namespace).
-		ProxyGet("http", name, "", "/v1/cert.pem", nil).
-		Stream()
-	if err != nil {
-		return nil, fmt.Errorf("Error fetching certificate: %v", err)
-	}
-	return f, nil
-}
-
-func openCert() (io.ReadCloser, error) {
-	if *certFile != "" {
-		return openCertFile(*certFile)
-	}
-
-	conf, err := clientConfig.ClientConfig()
-	if err != nil {
-		return nil, err
-	}
-	conf.AcceptContentTypes = "application/x-pem-file, */*"
-	restClient, err := corev1.NewForConfig(conf)
-	if err != nil {
-		return nil, err
-	}
-	return openCertHTTP(restClient, *controllerNs, *controllerName)
-}
-
-func seal(in io.Reader, out io.Writer, codecs runtimeserializer.CodecFactory, pubKey *rsa.PublicKey) error {
+func seal(in io.Reader, out io.Writer, codecs runtimeserializer.CodecFactory, keyName string) error {
 	secret, err := readSecret(codecs.UniversalDecoder(), in)
 	if err != nil {
 		return err
@@ -185,7 +123,7 @@ func seal(in io.Reader, out io.Writer, codecs runtimeserializer.CodecFactory, pu
 	secret.SetDeletionTimestamp(nil)
 	secret.DeletionGracePeriodSeconds = nil
 
-	ssecret, err := ssv1alpha1.NewSealedSecret(codecs, pubKey, secret)
+	ssecret, err := ssv1alpha1.NewSealedSecret(codecs, keyName, secret)
 	if err != nil {
 		return err
 	}
@@ -267,25 +205,7 @@ func main() {
 		return
 	}
 
-	f, err := openCert()
-	if err != nil {
-		panic(err.Error())
-	}
-	defer f.Close()
-
-	if *dumpCert {
-		if _, err := io.Copy(os.Stdout, f); err != nil {
-			panic(err.Error())
-		}
-		return
-	}
-
-	pubKey, err := parseKey(f)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	if err := seal(os.Stdin, os.Stdout, scheme.Codecs, pubKey); err != nil {
+	if err := seal(os.Stdin, os.Stdout, scheme.Codecs, *kmsKeyName); err != nil {
 		panic(err.Error())
 	}
 }
