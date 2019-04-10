@@ -115,7 +115,7 @@ func NewSealedSecret(codecs runtimeserializer.CodecFactory, pubKey *rsa.PublicKe
 }
 
 // Unseal decrypts and returns the embedded v1.Secret.
-func (s *SealedSecret) Unseal(codecs runtimeserializer.CodecFactory, privKey *rsa.PrivateKey) (*v1.Secret, error) {
+func (s *SealedSecret) Unseal(codecs runtimeserializer.CodecFactory, keyName string) (*v1.Secret, error) {
 	boolTrue := true
 	smeta := s.GetObjectMeta()
 
@@ -129,7 +129,7 @@ func (s *SealedSecret) Unseal(codecs runtimeserializer.CodecFactory, privKey *rs
 	if len(s.Spec.EncryptedData) > 0 {
 		secret.Data = map[string][]byte{}
 		for key, value := range s.Spec.EncryptedData {
-			plaintext, err := crypto.HybridDecrypt(rand.Reader, privKey, value, label)
+			plaintext, err := crypto.HybridDecrypt(rand.Reader, keyName, value, label)
 			if err != nil {
 				return nil, err
 			}
@@ -137,7 +137,7 @@ func (s *SealedSecret) Unseal(codecs runtimeserializer.CodecFactory, privKey *rs
 		}
 		secret.Type = s.Type
 	} else { // Support decrypting old secrets for backward compatibility
-		plaintext, err := crypto.HybridDecrypt(rand.Reader, privKey, s.Spec.Data, label)
+		plaintext, err := crypto.HybridDecrypt(rand.Reader, keyName, s.Spec.Data, label)
 		if err != nil {
 			return nil, err
 		}

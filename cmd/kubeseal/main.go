@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/rsa"
-	"errors"
+	"crypto/x509"
+	"encoding/pem"
 	goflag "flag"
 	"fmt"
 	"io"
@@ -20,7 +23,9 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/cert"
+
+	cloudkms "cloud.google.com/go/kms/apiv1"
+	kmspb "google.golang.org/genproto/googleapis/cloud/kms/v1"
 
 	ssv1alpha1 "github.com/bitnami-labs/sealed-secrets/pkg/apis/sealed-secrets/v1alpha1"
 
@@ -35,6 +40,7 @@ var (
 	certFile       = flag.String("cert", "", "Certificate / public key to use for encryption. Overrides --controller-*")
 	controllerNs   = flag.String("controller-namespace", metav1.NamespaceSystem, "Namespace of sealed-secrets controller.")
 	controllerName = flag.String("controller-name", "sealed-secrets-controller", "Name of sealed-secrets controller.")
+	kmsKeyName     = flag.String("kms-key", "", "KMS key name to encrypt with")
 	outputFormat   = flag.String("format", "json", "Output format for sealed secret. Either json or yaml")
 	dumpCert       = flag.Bool("fetch-cert", false, "Write certificate to stdout.  Useful for later use with --cert")
 	printVersion   = flag.Bool("version", false, "Print version information and exit")
@@ -66,22 +72,17 @@ func parseKey(r io.Reader) (*rsa.PublicKey, error) {
 		return nil, err
 	}
 
-	certs, err := cert.ParseCertsPEM(data)
+	block, _ := pem.Decode([]byte(data))
+	abstractKey, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse public key: %+v", err)
 	}
-
-	// ParseCertsPem returns error if len(certs) == 0, but best to be sure...
-	if len(certs) == 0 {
-		return nil, errors.New("Failed to read any certificates")
-	}
-
-	cert, ok := certs[0].PublicKey.(*rsa.PublicKey)
+	rsaKey, ok := abstractKey.(*rsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("Expected RSA public key but found %v", certs[0].PublicKey)
+		return nil, fmt.Errorf("key is not RSA")
 	}
 
-	return cert, nil
+	return rsaKey, nil
 }
 
 func readSecret(codec runtime.Decoder, r io.Reader) (*v1.Secret, error) {
@@ -121,32 +122,27 @@ func openCertFile(certFile string) (io.ReadCloser, error) {
 	return f, nil
 }
 
-func openCertHTTP(c corev1.CoreV1Interface, namespace, name string) (io.ReadCloser, error) {
-	f, err := c.
-		Services(namespace).
-		ProxyGet("http", name, "", "/v1/cert.pem", nil).
-		Stream()
-	if err != nil {
-		return nil, fmt.Errorf("Error fetching certificate: %v", err)
-	}
-	return f, nil
-}
-
 func openCert() (io.ReadCloser, error) {
 	if *certFile != "" {
 		return openCertFile(*certFile)
 	}
 
-	conf, err := clientConfig.ClientConfig()
+	if *kmsKeyName == "" {
+		return nil, fmt.Errorf("kms-key should be in format 'projects/<project-name>/locations/<location>/keyRings/<keyring-name>/cryptoKeys/<key-name>'")
+	}
+
+	ctx := context.Background()
+	client, err := cloudkms.NewKeyManagementClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	conf.AcceptContentTypes = "application/x-pem-file, */*"
-	restClient, err := corev1.NewForConfig(conf)
+
+	// Retrieve the public key from KMS.
+	response, err := client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{Name: *kmsKeyName})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch public key: %+v", err)
 	}
-	return openCertHTTP(restClient, *controllerNs, *controllerName)
+	return ioutil.NopCloser(bytes.NewReader([]byte(response.Pem))), nil
 }
 
 func seal(in io.Reader, out io.Writer, codecs runtimeserializer.CodecFactory, pubKey *rsa.PublicKey) error {

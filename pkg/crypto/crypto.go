@@ -1,13 +1,18 @@
 package crypto
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+
+	cloudkms "cloud.google.com/go/kms/apiv1"
+	kmspb "google.golang.org/genproto/googleapis/cloud/kms/v1"
 )
 
 const (
@@ -38,7 +43,7 @@ func HybridEncrypt(rnd io.Reader, pubKey *rsa.PublicKey, plaintext, label []byte
 	}
 
 	// Encrypt symmetric key
-	rsaCiphertext, err := rsa.EncryptOAEP(sha256.New(), rnd, pubKey, sessionKey, label)
+	rsaCiphertext, err := rsa.EncryptOAEP(sha256.New(), rnd, pubKey, sessionKey, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +64,7 @@ func HybridEncrypt(rnd io.Reader, pubKey *rsa.PublicKey, plaintext, label []byte
 }
 
 // HybridDecrypt performs a regular AES-GCM + RSA-OAEP decryption
-func HybridDecrypt(rnd io.Reader, privKey *rsa.PrivateKey, ciphertext, label []byte) ([]byte, error) {
+func HybridDecrypt(rnd io.Reader, keyName string, ciphertext, label []byte) ([]byte, error) {
 	if len(ciphertext) < 2 {
 		return nil, ErrTooShort
 	}
@@ -71,7 +76,7 @@ func HybridDecrypt(rnd io.Reader, privKey *rsa.PrivateKey, ciphertext, label []b
 	rsaCiphertext := ciphertext[2 : rsaLen+2]
 	aesCiphertext := ciphertext[rsaLen+2:]
 
-	sessionKey, err := rsa.DecryptOAEP(sha256.New(), rnd, privKey, rsaCiphertext, label)
+	sessionKey, err := kmsAsyncDecrypt(keyName, rsaCiphertext)
 	if err != nil {
 		return nil, err
 	}
@@ -95,4 +100,24 @@ func HybridDecrypt(rnd io.Reader, privKey *rsa.PrivateKey, ciphertext, label []b
 	}
 
 	return plaintext, nil
+}
+
+func kmsAsyncDecrypt(keyName string, ciphertext []byte) ([]byte, error) {
+	ctx := context.Background()
+	client, err := cloudkms.NewKeyManagementClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build the request.
+	req := &kmspb.AsymmetricDecryptRequest{
+		Name:       keyName,
+		Ciphertext: ciphertext,
+	}
+	// Call the API.
+	response, err := client.AsymmetricDecrypt(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("decryption request failed: %+v", err)
+	}
+	return response.Plaintext, nil
 }
